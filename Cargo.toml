@@ -1,0 +1,26 @@
+[package]
+name = "head-tracking-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Simple head tracking for games, using TrackIR or OpenTrack"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Khalzz/head-tracking-rs"
+readme = "README.md"
+keywords = ["headtracking", "trackir", "opentrack", "gamedev", "simulation"]
+categories = ["game-development"]
+exclude = ["TODO.md"]
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.9.0"
+winreg = "0.56.0"
+
+[dependencies]
+log = "0.4.34"
+
+[dev-dependencies]
+env_logger = "0.11.11"
+
+[package.metadata.docs.rs]
+# Build the docs as Windows so the TrackIR method is included.
+default-target = "x86_64-pc-windows-msvc"
