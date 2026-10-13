@@ -11,7 +11,7 @@ It works with:
 
 ```toml
 [dependencies]
-head-tracking-rs = "0.1"
+head-tracking-rs = "0.2"
 ```
 
 ## Quick start
