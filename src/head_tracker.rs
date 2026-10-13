@@ -27,6 +27,9 @@ use std::net::IpAddr;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HeadTrackerMethod {
+    /// Uses the TrackIR interface (NPClient64.dll), provided by the TrackIR software or by
+    /// OpenTrack's "freetrack 2.0 Enhanced" output.
+    ///
     /// Windows only. Also works for Windows builds running through Wine/Proton.
     #[cfg(windows)]
     TrackIR {
@@ -37,6 +40,7 @@ pub enum HeadTrackerMethod {
         /// Raw `HWND` of the game window. `None` uses the console window.
         window_handle: Option<isize>,
     },
+    /// Receives OpenTrack's "UDP over network" output. Works on every platform.
     OpenTrack {
         /// Must match the port in OpenTrack's "UDP over network" output, usually [`crate::DEFAULT_PORT`].
         port: u16,
@@ -63,8 +67,6 @@ pub struct HeadPose {
 
 /// Running state behind the selected method. Each variant owns whatever its method needs to keep alive.
 enum Backend {
-    /// Nothing is running, e.g. after `set_origin_method` failed.
-    Inactive,
     #[cfg(windows)]
     TrackIR(TrackIRClient),
     OpenTrack(OpenTrackClient),
@@ -74,7 +76,6 @@ enum Backend {
 impl fmt::Debug for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Backend::Inactive => f.write_str("Inactive"),
             #[cfg(windows)]
             Backend::TrackIR(_) => f.write_str("TrackIR"),
             Backend::OpenTrack(client) => match client.local_addr() {
@@ -92,26 +93,13 @@ impl fmt::Debug for Backend {
 #[derive(Debug)]
 pub struct HeadTracker {
     backend: Backend,
+    /// Set by `poll()` once the current method returns its first frame.
+    received: bool,
 }
 
 impl HeadTracker {
     pub fn new(method: HeadTrackerMethod) -> Result<Self, HeadTrackerError> {
-        let mut tracker = HeadTracker {
-            backend: Backend::Inactive,
-        };
-        tracker.set_origin_method(method)?;
-        Ok(tracker)
-    }
-
-    /**
-     * # Set Origin Method
-     * Allows you to define a new method for getting the headtracking data, this will allow you to change the method at runtime and start using a new method for getting the data.
-     * The previous method is shut down first. If the new one fails to start, the tracker is left inactive and `poll()` returns `None`.
-     */
-    pub fn set_origin_method(&mut self, method: HeadTrackerMethod) -> Result<(), HeadTrackerError> {
-        // Drop the old backend before starting the new one, so TrackIR unregisters before registering again.
-        self.backend = Backend::Inactive;
-        self.backend = match method {
+        let backend = match method {
             #[cfg(windows)]
             HeadTrackerMethod::TrackIR { id, axes, window_handle } => {
                 Backend::TrackIR(TrackIRClient::load(id, &axes, window_handle)?)
@@ -120,20 +108,77 @@ impl HeadTracker {
                 Backend::OpenTrack(OpenTrackClient::bind(address, port)?)
             }
         };
-        Ok(())
+        Ok(HeadTracker { backend, received: false })
+    }
+
+    /**
+     * # Set Origin Method
+     * Allows you to define a new method for getting the headtracking data, this will allow you to change the method at runtime and start using a new method for getting the data.
+     * The previous method is shut down first, so switching to the same method (e.g. TrackIR with other axes, or OpenTrack on the same port) works.
+     * Use it as `tracker = tracker.set_origin_method(method)?;`. If the new method fails to start, the old tracker is already gone and only the error is returned.
+     */
+    pub fn set_origin_method(self, method: HeadTrackerMethod) -> Result<Self, HeadTrackerError> {
+        // Drop the old backend before starting the new one, so TrackIR unregisters before registering again.
+        drop(self);
+        HeadTracker::new(method)
     }
 
     /**
      * # Poll
      * Retrieves the latest headtracking data from the currently selected method.
-     * Returns `None` when there is no new frame since the last poll, or when the tracker is inactive.
+     * Returns `None` when there is no new frame since the last poll.
      */
     pub fn poll(&mut self) -> Option<HeadPose> {
-        match &mut self.backend {
+        let pose = match &mut self.backend {
             #[cfg(windows)]
             Backend::TrackIR(client) => client.poll().map(|data| data.to_pose()),
             Backend::OpenTrack(client) => client.poll().map(|data| data.to_pose()),
-            Backend::Inactive => None,
-        }
+        };
+        self.received |= pose.is_some();
+        pose
+    }
+
+    /**
+     * # Status
+     * `true` once the current method has delivered a frame through `poll()`, `false` until then.
+     * It never blocks: keep calling `poll()` every frame and check this to see whether data is coming in.
+     * Neither TrackIR nor OpenTrack report a connection by themselves, so a frame is the only proof.
+     */
+    pub fn status(&self) -> bool {
+        self.received
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, UdpSocket};
+
+    fn opentrack_on_free_port() -> (HeadTracker, u16) {
+        let tracker = HeadTracker::new(HeadTrackerMethod::OpenTrack {
+            port: 0,
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        })
+        .unwrap();
+        #[allow(unreachable_patterns)]
+        let port = match &tracker.backend {
+            Backend::OpenTrack(client) => client.local_addr().unwrap().port(),
+            _ => unreachable!(),
+        };
+        (tracker, port)
+    }
+
+    #[test]
+    fn status_active_after_first_frame() {
+        let (mut tracker, port) = opentrack_on_free_port();
+        assert_eq!(tracker.poll(), None);
+        assert!(!tracker.status());
+
+        UdpSocket::bind("127.0.0.1:0").unwrap().send_to(&[0u8; 48], ("127.0.0.1", port)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert!(tracker.poll().is_some());
+        assert_eq!(tracker.poll(), None);
+        assert!(tracker.status());
     }
 }

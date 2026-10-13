@@ -91,12 +91,32 @@ TrackIR only exists on Windows. Windows builds of your game running on Linux thr
 You can change method while the game runs, for example from a settings menu:
 
 ```rust
-tracker.set_origin_method(HeadTrackerMethod::OpenTrack { port: 4242, address: "127.0.0.1".parse().unwrap() })?;
+tracker = tracker.set_origin_method(HeadTrackerMethod::OpenTrack { port: 4242, address: "127.0.0.1".parse().unwrap() })?;
 ```
+
+The old method is shut down before the new one starts. If the new one fails, you only get the error back, so keep the tracker in an `Option<HeadTracker>` if your game should keep running without head tracking.
+
+## Checking that data is arriving
+
+A tracker that started without errors isn't necessarily receiving anything: OpenTrack may be closed or set to a different output, and the TrackIR method can start even when no tracking software is running. Neither method reports a connection, so the only proof is a frame arriving.
+
+`status()` tells you exactly that: it's `false` until `poll()` has returned a frame, then `true`. It never blocks, so you can use it for a "detecting head tracking…" message or a retry button:
+
+```rust
+// Every frame, while detecting:
+let pose = tracker.poll(); // use this pose for the camera too
+if tracker.status() {
+    // head tracking works
+} else if started.elapsed() > Duration::from_secs(10) {
+    // nothing arrived: tell the player to check their tracking software
+}
+```
+
+Once `true` it stays `true` until you switch methods, even if the tracking software is closed later.
 
 ## When something goes wrong
 
-Starting a tracker returns a `HeadTrackerError` that tells you what happened, so you can show players a helpful message:
+If a tracker can't start, you get a `HeadTrackerError` that tells you what happened, so you can show players a helpful message:
 
 ```rust
 use head_tracking_rs::HeadTrackerError;
@@ -107,6 +127,8 @@ match HeadTracker::new(method) {
     Err(e) => println!("head tracking is not available: {e}"),
 }
 ```
+
+Starting without an error only means the method is ready. Use `status()` to know that data is actually arriving.
 
 Warnings (like a missing window handle) are sent through the [`log`](https://docs.rs/log) crate, so set up a logger such as [`env_logger`](https://docs.rs/env_logger) to see them.
 
